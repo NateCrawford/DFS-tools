@@ -14,7 +14,7 @@
 set -o pipefail
 
 usage () {
-  echo "Usage: Tar2DFS.sh source_dir dest_dir"
+  echo "Usage: Tar2DFS.sh source_dir dest_dir [rw_dir]"
 }
 
 #needs GNU parallel
@@ -25,6 +25,39 @@ if [[ $? != 0 ]]; then
 fi
 
 
+#Test inputs
+if [[ -z $1 ]]; then
+  echo "No source given"
+  usage
+  exit 11
+elif [[ -z $2 ]]; then
+  echo "No destination given"
+  usage
+  exit 12
+fi
+
+srcdir=$1
+destdir=$2
+rwdir=$3
+
+if [[ ! -d $srcdir ]]; then
+  echo "Source directory $srcdir not a directory. Aborting"
+  usage
+  exit 1
+fi
+if [[ ! -d $destdir ]]; then
+  echo "Destination directory $destdir not a directory. Aborting"
+  usage
+  exit 2
+fi
+if [[ ! -d $rwdir ]]; then
+  echo "Optional read-write directory $rwdir not a directory. Aborting"
+  usage
+  exit 3
+fi
+
+
+
 #cutoff for number of files to invoke tar on a directory. (If nfiles > cutoff, tar.)
 cutoff=1000
 #parallel options
@@ -32,12 +65,12 @@ maxp=4 #maximum simultaneous parallel operations
 blksz=100000 #rough block size in bytes to split input lists catted to parallel
 
 #specific file names (should agree with checking utility /beegfs/TOOLS/CheckMD5s.sh)
-rsyncfail=PARRSYNC_FAILURE_LIST
-notarobjs=OBJECTS_TO_TRANSFER_UNTARRED
-notarmd5s=RSYNCED.md5sums
-OKfile=TAR2DFS.OK
-NotOKfile=TAR2DFS.NOT_OK
-Logfile=TAR2DFS.log
+rsyncfail=$rwdir/PARRSYNC_FAILURE_LIST
+notarobjs=$rwdir/OBJECTS_TO_TRANSFER_UNTARRED
+notarmd5s=$rwdir/RSYNCED.md5sums
+OKfile=$rwdir/TAR2DFS.OK
+NotOKfile=$rwdir/TAR2DFS.NOT_OK
+Logfile=$rwdir/TAR2DFS.log
 
 #init counters/timers
 dircount=0
@@ -59,7 +92,8 @@ loggit () {
 #  It is called once per main-level directory. IO cost: meta; Net cost: none
 parfind () {
   local DIR="$1"
-  find "$DIR" -type f -print0 > "${DIR}.dircontents"
+  local RWDIR="$2"
+  find "$DIR" -type f -print0 > "$RWDIR/${DIR}.dircontents"
 }
 
 
@@ -115,30 +149,6 @@ parrsync () {
 #Must export functions to be able to run with parallel 
 export -f loggit parfind partar parrsync
 
-#Test inputs
-if [[ -z $1 ]]; then
-  echo "No source given"
-  usage
-  exit 11
-elif [[ -z $2 ]]; then
-  echo "No destination given"
-  usage
-  exit 12
-fi
-
-srcdir=$1
-destdir=$2
-
-if [[ ! -d $srcdir ]]; then
-  echo "Source directory $srcdir not a directory. Aborting"
-  usage
-  exit 1
-fi
-if [[ ! -d $destdir ]]; then
-  echo "Destination directory $destdir not a directory. Aborting"
-  usage
-  exit 2
-fi
 
 cd $srcdir
 
@@ -152,19 +162,26 @@ if [[ -f $OKfile ]]; then
   loggit $(<$OKfile)
   loggit "if you want to double-check for newer files, try this:"
   loggit "find $srcdir -type f -print0 | xargs -0 stat --format '%Y :%y %n' | sort -nr | cut -d: -f2- | head -n 2"
-  loggit "If it returns $Logfile and $OKfile, nothing is newer."
+  if [[ "$rwdir" -eq "" ]]; then
+    loggit "If it returns $Logfile and $OKfile, nothing is newer."
+  fi
   exit 0
+fi
+
+#if no rwdir given, use current directory
+if [[ "$rwdir" -eq "" ]]; then
+    rwdir="."
 fi
 
 
 # quick check for existing .dircontents
-if [[ $(find . -mindepth 1 -maxdepth 1 -name '*.dircontents' | wc -l) != 0 ]]; then
-  loggit "Existing .dircontents files, abort!"
+if [[ $(find $rwdir -mindepth 1 -maxdepth 1 -name '*.dircontents' | wc -l) != 0 ]]; then
+  loggit "Existing *.dircontents files, abort!"
   exit 4
-elif [[ $(find . -mindepth 1 -maxdepth 1 -name '*.tar_retry' | wc -l) != 0 ]]; then
+elif [[ $(find $rwdir -mindepth 1 -maxdepth 1 -name '*.tar_retry' | wc -l) != 0 ]]; then
   #only re-tar failed directories
   loggit ".tar_retry files found, attempting re-tar and skipping other objects"
-  rename .tar_retry .dircontents *.tar_retry
+  rename .tar_retry .dircontents $rwdir/*.tar_retry
   totdirs=$(find -mindepth 1 -maxdepth 1 -type f -name '*.dircontents' | wc -l)
 elif [[ -f $rsyncfail ]]; then
   #check for failure of final rsync
